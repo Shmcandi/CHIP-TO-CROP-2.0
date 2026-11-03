@@ -5,7 +5,8 @@ Hackathon: CHIP TO CROP 2.0
 Role: Dev 2 Space (Vision AI)
 """
 
-from maix import camera, display, image, uart
+import argparse
+import sys
 import time
 
 # ======================= CONFIGURATION ==========================
@@ -25,10 +26,112 @@ PLANT_LAB_THRESHOLDS = [(30, 85, -64, -20, 10, 60)]
 
 # ======================= INITIALIZATION =========================
 def init_system():
+    from maix import camera, display, uart
+
     cam = camera.Camera(FRAME_WIDTH, FRAME_HEIGHT)
     disp = display.Display()
     serial_comm = uart.UART(UART_PORT, UART_BAUDRATE)
     return cam, disp, serial_comm
+
+
+def run_simulator():
+    commands = [
+        "STRAFE_LEFT",
+        "STRAFE_LEFT",
+        "ALIGNED_STOP",
+        "ALIGNED_STOP",
+        "STRAFE_RIGHT",
+        "STRAFE_RIGHT",
+        "NO_TARGET",
+        "NO_TARGET",
+        "ALIGNED_STOP",
+        "ALIGNED_STOP",
+    ]
+    for index, command in enumerate(commands):
+        print(command, flush=True)
+        if index < len(commands) - 1:
+            time.sleep(0.1)
+
+
+def run_desktop_simulator():
+    import math
+
+    import cv2
+    import numpy as np
+
+    plant_x = FRAME_WIDTH // 2
+    plant_visible = True
+    stressed = False
+    auto_move = False
+    command = "NO_TARGET"
+    candidate = command
+    stable_frames = 0
+    started = time.monotonic()
+
+    while True:
+        now = time.monotonic()
+        if auto_move:
+            plant_x = int(FRAME_WIDTH / 2 + math.sin(now - started) * 210)
+
+        frame = np.full((FRAME_HEIGHT, FRAME_WIDTH, 3), (38, 49, 39), dtype=np.uint8)
+        cv2.rectangle(frame, (0, 0), (FRAME_WIDTH - 1, FRAME_HEIGHT - 1), (76, 91, 73), 3)
+        for y in range(95, FRAME_HEIGHT, 70):
+            cv2.line(frame, (0, y), (FRAME_WIDTH, y), (49, 65, 53), 1)
+
+        cv2.rectangle(frame, (DEADBAND_LEFT, 0), (DEADBAND_RIGHT, FRAME_HEIGHT), (55, 63, 45), -1)
+        cv2.line(frame, (DEADBAND_LEFT, 0), (DEADBAND_LEFT, FRAME_HEIGHT), (0, 220, 255), 2)
+        cv2.line(frame, (DEADBAND_RIGHT, 0), (DEADBAND_RIGHT, FRAME_HEIGHT), (0, 220, 255), 2)
+
+        if plant_visible:
+            leaf_color = (65, 180, 65) if not stressed else (35, 185, 210)
+            cv2.line(frame, (plant_x, 345), (plant_x, 215), (55, 135, 65), 10)
+            for dx, dy, angle in [(-38, -15, 25), (35, -40, -25), (-42, -75, 20), (37, -105, -20), (0, -135, 0)]:
+                center = (plant_x + dx, 345 + dy)
+                cv2.ellipse(frame, center, (42, 17), angle, 0, 360, leaf_color, -1)
+                cv2.ellipse(frame, center, (42, 17), angle, 0, 360, (125, 210, 125), 1)
+            cv2.rectangle(frame, (plant_x - 75, 190), (plant_x + 75, 365), (245, 245, 245), 1)
+            if plant_x < DEADBAND_LEFT:
+                next_candidate = "STRAFE_LEFT"
+            elif plant_x > DEADBAND_RIGHT:
+                next_candidate = "STRAFE_RIGHT"
+            else:
+                next_candidate = "ALIGNED_STOP"
+        else:
+            next_candidate = "NO_TARGET"
+
+        if next_candidate == candidate:
+            stable_frames += 1
+        else:
+            candidate = next_candidate
+            stable_frames = 1
+        if stable_frames >= 3:
+            command = candidate
+
+        cv2.putText(frame, f"VISION SIMULATOR  |  {command}", (18, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (245, 245, 245), 2)
+        cv2.putText(frame, f"Plant: {'STRESSED' if stressed else 'HEALTHY'}   Target: {'VISIBLE' if plant_visible else 'HIDDEN'}", (18, 455), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (225, 225, 225), 1)
+        cv2.imshow("CHIP TO CROP - Vision Tracking Simulator", frame)
+
+        key = cv2.waitKey(30) & 0xFF
+        if key in (ord("q"), 27):
+            break
+        if key == ord("s"):
+            stressed = not stressed
+        elif key == ord("p"):
+            plant_visible = not plant_visible
+        elif key == ord("a"):
+            auto_move = False
+            plant_x = max(30, plant_x - 50)
+        elif key == ord("d"):
+            auto_move = False
+            plant_x = min(FRAME_WIDTH - 30, plant_x + 50)
+        elif key == ord("c"):
+            auto_move = False
+            plant_x = FRAME_WIDTH // 2
+        elif key == ord("m"):
+            auto_move = not auto_move
+            started = time.monotonic()
+
+    cv2.destroyAllWindows()
 
 
 # ========================= VISION LOOP ==========================
@@ -90,4 +193,18 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--no-gui", action="store_true")
+    parser.add_argument("--simulator", action="store_true")
+    parser.add_argument("--port", default=UART_PORT)
+    args = parser.parse_args()
+
+    if args.simulator:
+        run_desktop_simulator()
+    elif args.no_gui:
+        if args.port != "stdout":
+            print("Headless simulation requires --port stdout", file=sys.stderr)
+            sys.exit(2)
+        run_simulator()
+    else:
+        main()
