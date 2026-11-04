@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
 """
-PrecisionRover - Main Orchestrator Loop
+PrecisionRover - 6WD Skid-Steer Main Orchestrator Loop
 Platform: Raspberry Pi 5
 Hackathon: CHIP TO CROP 2.0
 Role: Dev 1 Space (Core Orchestrator)
+
+Kinematics: 6WD Skid-Steer (Tank Drive) via Dual BTS7960 43A High-Current H-Bridges
+Sensors & Actuators:
+  - 2x BTS7960 Motor Drivers (3 Left DC Motors, 3 Right DC Motors)
+  - PCA9685 16-Channel PWM Servo Driver (2x MG995R Servos)
+  - 5V Submersible Pump Relay
+  - HC-SR04 Ultrasonic Distance Sensor
+  - MaixCam UART & ESP32 USB Serial Ingestion
+  - MQTT Telemetry Publisher
 """
 
 import time
@@ -11,34 +20,31 @@ import json
 import threading
 import queue
 import serial
-from gpiozero import DigitalOutputDevice
+from gpiozero import PWMOutputDevice, DigitalOutputDevice, DistanceSensor
 from adafruit_pca9685 import PCA9685
 import board
 import busio
 import paho.mqtt.client as mqtt
 
 # ======================== PIN DEFINITIONS ========================
-# L298N Motor Driver A (Left Front & Left Rear)
-PIN_LF_EN  = 12   # Hardware PWM
-PIN_LF_IN1 = 5
-PIN_LF_IN2 = 6
-PIN_LR_EN  = 13   # Hardware PWM
-PIN_LR_IN3 = 19
-PIN_LR_IN4 = 26
+# BTS7960 Motor Driver 1: Left Bank (3x DC Motors in parallel)
+PIN_L_RPWM = 12   # Forward PWM (Hardware PWM0)
+PIN_L_LPWM = 13   # Reverse PWM (Hardware PWM1)
+PIN_L_REN  = 5    # Right Enable (Active High)
+PIN_L_LEN  = 6    # Left Enable (Active High)
 
-# L298N Motor Driver B (Right Front & Right Rear)
-PIN_RF_EN  = 18   # Hardware PWM
-PIN_RF_IN1 = 23
-PIN_RF_IN2 = 24
-PIN_RR_EN  = 16   # Hardware PWM
-PIN_RR_IN3 = 20
-PIN_RR_IN4 = 21
+# BTS7960 Motor Driver 2: Right Bank (3x DC Motors in parallel)
+PIN_R_RPWM = 18   # Forward PWM (Hardware PWM0)
+PIN_R_LPWM = 19   # Reverse PWM (Hardware PWM1)
+PIN_R_REN  = 23   # Right Enable (Active High)
+PIN_R_LEN  = 24   # Left Enable (Active High)
 
+# Actuation & Sensor Pins
 PIN_RELAY_PUMP  = 4
 ULTRASONIC_TRIG = 27
 ULTRASONIC_ECHO = 22
 
-# ==================== CONSTANTS & PROTOCOLS =====================
+# Serial & Network Protocol Definitions
 SERIAL_PORT_ESP32 = "/dev/ttyUSB0"
 SERIAL_PORT_MAIX  = "/dev/ttyAMA0"
 BAUD_RATE         = 115200
@@ -51,49 +57,111 @@ vision_queue = queue.Queue(maxsize=10)
 sensor_queue = queue.Queue(maxsize=10)
 
 
-# ======================== ACTUATOR DRIVER ========================
-class MotorController:
-    """Mecanum kinematics controller using dual L298N H-bridges."""
-    def __init__(self):
-        self.lf_in1 = DigitalOutputDevice(PIN_LF_IN1)
-        self.lf_in2 = DigitalOutputDevice(PIN_LF_IN2)
-        self.lr_in3 = DigitalOutputDevice(PIN_LR_IN3)
-        self.lr_in4 = DigitalOutputDevice(PIN_LR_IN4)
-        
-        self.rf_in1 = DigitalOutputDevice(PIN_RF_IN1)
-        self.rf_in2 = DigitalOutputDevice(PIN_RF_IN2)
-        self.rr_in3 = DigitalOutputDevice(PIN_RR_IN3)
-        self.rr_in4 = DigitalOutputDevice(PIN_RR_IN4)
+# ==================== 6WD SKID-STEER DRIVER =====================
+class BTS7960Bank:
+    """Controls one side of 3x DC motors driven by a BTS7960 H-Bridge."""
+    def __init__(self, rpwm_pin, lpwm_pin, ren_pin, len_pin, frequency=1000):
+        self.rpwm = PWMOutputDevice(rpwm_pin, frequency=frequency, initial_value=0)
+        self.lpwm = PWMOutputDevice(lpwm_pin, frequency=frequency, initial_value=0)
+        self.ren  = DigitalOutputDevice(ren_pin, initial_value=True)
+        self.len  = DigitalOutputDevice(len_pin, initial_value=True)
+
+    def drive(self, speed):
+        """
+        Drive bank with normalized speed in [-1.0, 1.0].
+        Positive: Forward (RPWM active, LPWM 0)
+        Negative: Reverse (LPWM active, RPWM 0)
+        0.0: Stop
+        """
+        self.ren.on()
+        self.len.on()
+        speed = max(-1.0, min(1.0, speed))
+        if speed > 0:
+            self.lpwm.value = 0.0
+            self.rpwm.value = speed
+        elif speed < 0:
+            self.rpwm.value = 0.0
+            self.lpwm.value = abs(speed)
+        else:
+            self.stop()
 
     def stop(self):
-        for dev in [self.lf_in1, self.lf_in2, self.lr_in3, self.lr_in4,
-                    self.rf_in1, self.rf_in2, self.rr_in3, self.rr_in4]:
-            dev.off()
+        self.rpwm.value = 0.0
+        self.lpwm.value = 0.0
 
-    def strafe_left(self):
-        # FL reverse, FR forward, RL forward, RR reverse
-        self.lf_in1.off(); self.lf_in2.on()
-        self.rf_in1.on();  self.rf_in2.off()
-        self.lr_in3.on();  self.lr_in4.off()
-        self.rr_in3.off(); self.rr_in4.on()
 
-    def strafe_right(self):
-        # FL forward, FR reverse, RL reverse, RR forward
-        self.lf_in1.on();  self.lf_in2.off()
-        self.rf_in1.off(); self.rf_in2.on()
-        self.lr_in3.off(); self.lr_in4.on()
-        self.rr_in3.on();  self.rr_in4.off()
+class SkidSteer6WDController:
+    """6WD Skid-Steer (Tank Drive) kinematics coordinator."""
+    def __init__(self):
+        self.left_bank  = BTS7960Bank(PIN_L_RPWM, PIN_L_LPWM, PIN_L_REN, PIN_L_LEN)
+        self.right_bank = BTS7960Bank(PIN_R_RPWM, PIN_R_LPWM, PIN_R_REN, PIN_R_LEN)
+        # Default cruise speeds and trim scalars
+        self.base_speed = 0.6
+        self.turn_speed = 0.55
+        self.trim_left  = 1.0
+        self.trim_right = 1.0
 
-    def forward(self):
-        self.lf_in1.on(); self.lf_in2.off()
-        self.rf_in1.on(); self.rf_in2.off()
-        self.lr_in3.on(); self.lr_in4.off()
-        self.rr_in3.on(); self.rr_in4.off()
+    def stop(self):
+        self.left_bank.stop()
+        self.right_bank.stop()
+
+    def forward(self, speed=None):
+        spd = (speed or self.base_speed)
+        self.left_bank.drive(spd * self.trim_left)
+        self.right_bank.drive(spd * self.trim_right)
+
+    def reverse(self, speed=None):
+        spd = (speed or self.base_speed)
+        self.left_bank.drive(-spd * self.trim_left)
+        self.right_bank.drive(-spd * self.trim_right)
+
+    def steer_left(self, speed=None):
+        """Skid turn left: left wheels reverse, right wheels forward."""
+        spd = (speed or self.turn_speed)
+        self.left_bank.drive(-spd * 0.7)
+        self.right_bank.drive(spd)
+
+    def steer_right(self, speed=None):
+        """Skid turn right: left wheels forward, right wheels reverse."""
+        spd = (speed or self.turn_speed)
+        self.left_bank.drive(spd)
+        self.right_bank.drive(-spd * 0.7)
+
+
+# ===================== DUAL SERVO CONTROLLER ====================
+class ProbeMechanism:
+    """Controls vertical rack-and-pinion and deployment via PCA9685."""
+    CHANNEL_RACK_PINION = 0  # Servo 1: Vertical insertion
+    CHANNEL_DEPLOYMENT  = 1  # Servo 2: Angle articulation
+
+    def __init__(self, pca_driver):
+        self.pca = pca_driver
+
+    def _set_angle(self, channel, angle):
+        if not self.pca:
+            return
+        # MG995R 50Hz PWM: ~1.0ms (0 deg) to ~2.0ms (180 deg) -> ~5% to ~10% duty cycle
+        min_duty = 0x0A00  # ~1.0ms (~65535 * 0.05)
+        max_duty = 0x1E00  # ~2.0ms (~65535 * 0.10)
+        duty = int(min_duty + (angle / 180.0) * (max_duty - min_duty))
+        self.pca.channels[channel].duty_cycle = max(min_duty, min(max_duty, duty))
+
+    def retract(self):
+        print("[ARM] Retracting probe mechanism to home position...")
+        self._set_angle(self.CHANNEL_DEPLOYMENT, 0)
+        time.sleep(0.5)
+        self._set_angle(self.CHANNEL_RACK_PINION, 0)
+
+    def plunge(self):
+        print("[ARM] Deploying probe and plunging into soil...")
+        self._set_angle(self.CHANNEL_DEPLOYMENT, 90)
+        time.sleep(0.5)
+        self._set_angle(self.CHANNEL_RACK_PINION, 120)
 
 
 # ========================= SERIAL LISTENERS ======================
 def read_esp32_serial(port):
-    """Continuously parse incoming JSON telemetry from ESP32."""
+    """Continuously parse incoming single-line JSON telemetry from ESP32."""
     try:
         ser = serial.Serial(port, BAUD_RATE, timeout=1.0)
         while True:
@@ -106,28 +174,41 @@ def read_esp32_serial(port):
                 except json.JSONDecodeError:
                     pass
     except Exception as e:
-        print(f"[ERR] ESP32 Serial error: {e}")
+        print(f"[ERR] ESP32 Serial thread exception: {e}")
 
 
 def read_maixcam_uart(port):
-    """Continuously parse single-line control strings from MaixCam."""
+    """Continuously parse incoming ASCII steering strings from MaixCam."""
+    allowed_cmds = {"STEER_LEFT", "STEER_RIGHT", "ALIGNED_STOP", "NO_TARGET", "STRAFE_LEFT", "STRAFE_RIGHT"}
     try:
         ser = serial.Serial(port, BAUD_RATE, timeout=0.1)
         while True:
             cmd = ser.readline().decode('utf-8', errors='ignore').strip()
-            if cmd in ["STRAFE_LEFT", "STRAFE_RIGHT", "ALIGNED_STOP", "NO_TARGET"]:
+            if cmd in allowed_cmds:
+                # Normalize legacy STRAFE to STEER
+                if cmd == "STRAFE_LEFT":
+                    cmd = "STEER_LEFT"
+                elif cmd == "STRAFE_RIGHT":
+                    cmd = "STEER_RIGHT"
                 if not vision_queue.full():
                     vision_queue.put(cmd)
     except Exception as e:
-        print(f"[ERR] MaixCam UART error: {e}")
+        print(f"[ERR] MaixCam UART thread exception: {e}")
 
 
 # ========================== MAIN ROUTINE =========================
 def main():
-    print("[INIT] Starting PrecisionRover Main Orchestrator...")
-    motors = MotorController()
+    print("[INIT] Starting PrecisionRover 6WD Skid-Steer Orchestrator...")
+    motors = SkidSteer6WDController()
     pump_relay = DigitalOutputDevice(PIN_RELAY_PUMP, active_high=False, initial_value=False)
     
+    # Initialize Ultrasonic Obstacle Sensor
+    try:
+        sonar = DistanceSensor(echo=ULTRASONIC_ECHO, trigger=ULTRASONIC_TRIG, max_distance=2.0)
+    except Exception as e:
+        sonar = None
+        print(f"[WARN] HC-SR04 sonar sensor unavailable: {e}")
+
     # Initialize PCA9685 via CircuitPython Board Bus
     try:
         i2c = busio.I2C(board.SCL, board.SDA)
@@ -135,16 +216,16 @@ def main():
         pca.frequency = 50
     except Exception as e:
         pca = None
-        print(f"[WARN] PCA9685 not initialized: {e}")
+        print(f"[WARN] PCA9685 servo driver unavailable: {e}")
 
-    # Launch Serial Ingestion Threads
-    t_esp = threading.Thread(target=read_esp32_serial, args=(SERIAL_PORT_ESP32,), daemon=True)
-    t_maix = threading.Thread(target=read_maixcam_uart, args=(SERIAL_PORT_MAIX,), daemon=True)
-    t_esp.start()
-    t_maix.start()
+    probe = ProbeMechanism(pca)
+
+    # Launch Background Sensor Ingestion Threads
+    threading.Thread(target=read_esp32_serial, args=(SERIAL_PORT_ESP32,), daemon=True).start()
+    threading.Thread(target=read_maixcam_uart, args=(SERIAL_PORT_MAIX,), daemon=True).start()
 
     # MQTT Client Setup
-    mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, "Pi5_Orchestrator")
+    mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, "Pi5_6WD_Orchestrator")
     try:
         mqtt_client.connect(MQTT_BROKER, 1883, 60)
         mqtt_client.loop_start()
@@ -156,6 +237,14 @@ def main():
 
     try:
         while True:
+            # Obstacle Safety Check
+            obstacle_dist_cm = (sonar.distance * 100.0) if sonar else 100.0
+            if obstacle_dist_cm < 18.0 and state == "SEARCHING":
+                print(f"[SAFETY] Obstacle detected at {obstacle_dist_cm:.1f} cm! Halting rover.")
+                motors.stop()
+                time.sleep(0.2)
+                continue
+
             # Drain sensor queue for latest payload
             while not sensor_queue.empty():
                 latest_sensor_data = sensor_queue.get_nowait()
@@ -164,10 +253,10 @@ def main():
             if state == "SEARCHING":
                 vision_cmd = vision_queue.get() if not vision_queue.empty() else "NO_TARGET"
                 
-                if vision_cmd == "STRAFE_LEFT":
-                    motors.strafe_left()
-                elif vision_cmd == "STRAFE_RIGHT":
-                    motors.strafe_right()
+                if vision_cmd == "STEER_LEFT":
+                    motors.steer_left()
+                elif vision_cmd == "STEER_RIGHT":
+                    motors.steer_right()
                 elif vision_cmd == "ALIGNED_STOP":
                     motors.stop()
                     print("[FSM] Plant aligned. Transitioning to PROBING.")
@@ -177,16 +266,14 @@ def main():
 
             elif state == "PROBING":
                 motors.stop()
-                # Deploy Servo Arm
-                if pca:
-                    pca.channels[0].duty_cycle = 0x1A00  # Set deployment angle (~90 deg)
-                    time.sleep(2.0)                      # Soil insertion delay
+                probe.plunge()
+                time.sleep(2.0)  # Stabilize sensor in root zone
                 
-                # Check soil moisture from telemetry
+                # Check soil moisture from ESP32 telemetry
                 moisture = latest_sensor_data.get("soil_moisture_pct", 100.0)
                 print(f"[DATA] In-situ Soil Moisture: {moisture}%")
 
-                if moisture < 30.0:
+                if moisture < 35.0:
                     print("[ACTION] Low moisture detected. Triggering Irrigation...")
                     state = "IRRIGATING"
                 else:
@@ -195,30 +282,31 @@ def main():
 
             elif state == "IRRIGATING":
                 pump_relay.on()
-                time.sleep(3.0)  # Dispense water pulse
+                time.sleep(3.0)  # Deliver 5V pump pulse
                 pump_relay.off()
                 state = "RETRACTING"
 
             elif state == "RETRACTING":
-                if pca:
-                    pca.channels[0].duty_cycle = 0x0D00  # Retract to 0 deg
-                    time.sleep(1.5)
+                probe.retract()
+                time.sleep(1.5)
                 state = "SEARCHING"
 
-            # Periodic Telemetry Publish
+            # Periodic Unified Telemetry Dispatch
             telemetry_packet = {
                 "timestamp": time.time(),
                 "fsm_state": state,
+                "obstacle_dist_cm": round(obstacle_dist_cm, 1),
                 "sensors": latest_sensor_data
             }
             mqtt_client.publish(MQTT_TOPIC_TELEMETRY, json.dumps(telemetry_packet))
             time.sleep(0.05)
 
     except KeyboardInterrupt:
-        print("[SHUTDOWN] Stopping all rover actuators...")
+        print("[SHUTDOWN] Halting rover actuators...")
         motors.stop()
         pump_relay.off()
         if pca:
+            probe.retract()
             pca.deinit()
 
 

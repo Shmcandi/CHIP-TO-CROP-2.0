@@ -4,12 +4,13 @@
 import sys
 import time
 
-
 ALLOWED_COMMANDS = {
-    "STRAFE_LEFT",
-    "STRAFE_RIGHT",
+    "STEER_LEFT",
+    "STEER_RIGHT",
     "ALIGNED_STOP",
     "NO_TARGET",
+    "STRAFE_LEFT",
+    "STRAFE_RIGHT",
 }
 MIN_RATE_HZ = 5.0
 

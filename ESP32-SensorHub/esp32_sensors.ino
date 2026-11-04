@@ -1,5 +1,5 @@
 /**
- * PrecisionRover - Analog Sensor Hub Firmware
+ * PrecisionRover - Analog Sensor Hub Firmware (6WD Rover Architecture)
  * Target: ESP32 Dev Module (Arduino Core)
  * Hackathon: CHIP TO CROP 2.0
  * Role: Dev 3 Space (Sensor Hub)
@@ -12,7 +12,7 @@ const int PIN_SOIL_ADC       = 34; // ADC1_CH6 (Isolated from Wi-Fi ADC2 conflic
 const int PIN_TURBIDITY_ADC  = 35; // ADC1_CH7
 
 // ======================= CALIBRATION CONSTANTS ==================
-// Capacitive Sensor Raw Calibration Constants (12-bit ADC: 0 - 4095)
+// Capacitive Sensor Raw Calibration (12-bit ADC: 0 - 4095)
 const float SOIL_RAW_AIR     = 3200.0; // Sensor completely dry in air
 const float SOIL_RAW_WATER   = 1450.0; // Sensor submerged in water to max line
 
@@ -20,7 +20,7 @@ const float SOIL_RAW_WATER   = 1450.0; // Sensor submerged in water to max line
 const float ADC_VOLTAGE_REF  = 3.3;
 const float ADC_RESOLUTION   = 4095.0;
 
-// Filter Constant (0.0 to 1.0) - Lower values = heavier filtering
+// Low-pass Filter Constant (0.0 to 1.0) - Lower = heavier smoothing
 const float FILTER_ALPHA     = 0.15;
 
 // State Variables
@@ -46,7 +46,7 @@ void loop() {
   int raw_soil = analogRead(PIN_SOIL_ADC);
   int raw_turb = analogRead(PIN_TURBIDITY_ADC);
 
-  // Apply Exponential Moving Average (EMA)
+  // Apply Exponential Moving Average (EMA) to suppress motor electrical ripple
   filtered_soil_raw = (FILTER_ALPHA * raw_soil) + ((1.0 - FILTER_ALPHA) * filtered_soil_raw);
   filtered_turb_raw = (FILTER_ALPHA * raw_turb) + ((1.0 - FILTER_ALPHA) * filtered_turb_raw);
 
@@ -65,7 +65,7 @@ void loop() {
     float ntu = -1120.4 * (turb_voltage * turb_voltage) + (5742.3 * turb_voltage) - 4353.8;
     ntu = constrain(ntu, 0.0, 3000.0);
 
-    // Stream Single-Line JSON Payload
+    // Stream Single-Line JSON Telemetry Payload
     Serial.print("{\"soil_moisture_pct\":");
     Serial.print(moisture_pct, 2);
     Serial.print(",\"turbidity_ntu\":");

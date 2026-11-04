@@ -1,8 +1,14 @@
 """
-PrecisionRover - Edge AI Visual Crop Alignment
+PrecisionRover - Edge AI Visual Crop Alignment (6WD Skid-Steer Edition)
 Platform: Sipeed MaixCam (K230 / MaixPy v4)
 Hackathon: CHIP TO CROP 2.0
 Role: Dev 2 Space (Vision AI)
+
+Output Commands over UART:
+  - STEER_LEFT   : Target plant located in left sector
+  - ALIGNED_STOP : Target plant centered within deadband
+  - STEER_RIGHT  : Target plant located in right sector
+  - NO_TARGET    : No crop detected in frame
 """
 
 import argparse
@@ -19,7 +25,7 @@ DEADBAND_RIGHT = 380
 UART_PORT = "/dev/ttyS0"  # MaixCam hardware UART port
 UART_BAUDRATE = 115200
 
-# Color Thresholds for Healthy Foliage (LAB Color Space)
+# Color Thresholds for Foliage in LAB Color Space
 # (L_MIN, L_MAX, A_MIN, A_MAX, B_MIN, B_MAX)
 PLANT_LAB_THRESHOLDS = [(30, 85, -64, -20, 10, 60)]
 
@@ -35,13 +41,14 @@ def init_system():
 
 
 def run_simulator():
+    """Mock ASCII stream for testing orchestrator pipelines."""
     commands = [
-        "STRAFE_LEFT",
-        "STRAFE_LEFT",
+        "STEER_LEFT",
+        "STEER_LEFT",
         "ALIGNED_STOP",
         "ALIGNED_STOP",
-        "STRAFE_RIGHT",
-        "STRAFE_RIGHT",
+        "STEER_RIGHT",
+        "STEER_RIGHT",
         "NO_TARGET",
         "NO_TARGET",
         "ALIGNED_STOP",
@@ -54,8 +61,8 @@ def run_simulator():
 
 
 def run_desktop_simulator():
+    """Interactive GUI simulator for desktop validation."""
     import math
-
     import cv2
     import numpy as np
 
@@ -78,6 +85,7 @@ def run_desktop_simulator():
         for y in range(95, FRAME_HEIGHT, 70):
             cv2.line(frame, (0, y), (FRAME_WIDTH, y), (49, 65, 53), 1)
 
+        # Draw alignment deadband lines
         cv2.rectangle(frame, (DEADBAND_LEFT, 0), (DEADBAND_RIGHT, FRAME_HEIGHT), (55, 63, 45), -1)
         cv2.line(frame, (DEADBAND_LEFT, 0), (DEADBAND_LEFT, FRAME_HEIGHT), (0, 220, 255), 2)
         cv2.line(frame, (DEADBAND_RIGHT, 0), (DEADBAND_RIGHT, FRAME_HEIGHT), (0, 220, 255), 2)
@@ -90,10 +98,12 @@ def run_desktop_simulator():
                 cv2.ellipse(frame, center, (42, 17), angle, 0, 360, leaf_color, -1)
                 cv2.ellipse(frame, center, (42, 17), angle, 0, 360, (125, 210, 125), 1)
             cv2.rectangle(frame, (plant_x - 75, 190), (plant_x + 75, 365), (245, 245, 245), 1)
+            
+            # Skid-Steer Alignment Logic
             if plant_x < DEADBAND_LEFT:
-                next_candidate = "STRAFE_LEFT"
+                next_candidate = "STEER_LEFT"
             elif plant_x > DEADBAND_RIGHT:
-                next_candidate = "STRAFE_RIGHT"
+                next_candidate = "STEER_RIGHT"
             else:
                 next_candidate = "ALIGNED_STOP"
         else:
@@ -107,9 +117,9 @@ def run_desktop_simulator():
         if stable_frames >= 3:
             command = candidate
 
-        cv2.putText(frame, f"VISION SIMULATOR  |  {command}", (18, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (245, 245, 245), 2)
+        cv2.putText(frame, f"6WD VISION SIMULATOR  |  {command}", (18, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (245, 245, 245), 2)
         cv2.putText(frame, f"Plant: {'STRESSED' if stressed else 'HEALTHY'}   Target: {'VISIBLE' if plant_visible else 'HIDDEN'}", (18, 455), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (225, 225, 225), 1)
-        cv2.imshow("CHIP TO CROP - Vision Tracking Simulator", frame)
+        cv2.imshow("CHIP TO CROP - 6WD Skid-Steer Tracking Simulator", frame)
 
         key = cv2.waitKey(30) & 0xFF
         if key in (ord("q"), 27):
@@ -140,7 +150,7 @@ def main():
     last_command = ""
     command_hold_counter = 0
 
-    print("[MAIXCAM] Vision Alignment Loop Active...")
+    print("[MAIXCAM] 6WD Vision Alignment Loop Active...")
 
     while True:
         img = cam.read()
@@ -158,15 +168,15 @@ def main():
             cx = largest_blob.cx()
             cy = largest_blob.cy()
 
-            # Draw visual debug artifacts on the display frame
+            # Visual debug artifacts on display frame
             img.draw_rectangle(largest_blob.rect(), color=(255, 0, 0), thickness=2)
             img.draw_cross(cx, cy, color=(0, 0, 255), size=10)
 
-            # Spatial Alignment Logic
+            # Spatial Skid-Steer Alignment Logic
             if cx < DEADBAND_LEFT:
-                target_command = "STRAFE_LEFT"
+                target_command = "STEER_LEFT"
             elif cx > DEADBAND_RIGHT:
-                target_command = "STRAFE_RIGHT"
+                target_command = "STEER_RIGHT"
             else:
                 target_command = "ALIGNED_STOP"
 
@@ -185,7 +195,7 @@ def main():
         if command_hold_counter >= 3:
             payload = f"{target_command}\n"
             comm.write(payload.encode('ascii'))
-            command_hold_counter = 0  # Reset counter to throttle output
+            command_hold_counter = 0
 
         # Render to MaixCam screen
         img.draw_string(10, 10, f"CMD: {last_command}", color=(0, 255, 0), scale=1.5)
