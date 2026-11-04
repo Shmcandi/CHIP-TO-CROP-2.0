@@ -4,9 +4,10 @@ Comprehensive workspace, system architecture, and development tracker for the "P
 
 ---
 
-## System Architecture
-
-PrecisionRover utilizes a modular three-tier compute and sensing architecture designed to isolate real-time analog data acquisition, high-speed edge vision inference, and high-level autonomous kinematics and coordination. The mobility platform features a **6WD Acrylic Curious Rover Chassis** utilizing 6x DC gearmotors driven via skid-steer (tank drive) kinematics through **2x BTS7960 43A High-Current H-Bridge Motor Drivers**.
+## System Architecture & Communication Flow
+- **The Vision Edge:** MaixCam handles AI plant detection and alignment logic. It sends simple movement commands (Left, Right, Center) to the Pi 5 via **UART Serial**.
+- **The Sensor Hub:** An ESP32-S3 reads all physical environment sensors (Ultrasonic, Soil Moisture, Turbidity). It bundles this data into a JSON packet and streams it to the Pi 5 via **USB Serial**.
+- **The Core Orchestrator:** The Raspberry Pi 5 acts as the central brain. It receives JSON from the ESP32-S3 and strings from the MaixCam, calculates the skid-steer kinematics, drives the BTS7960 motors, triggers the 5V pump, and pushes the final telemetry to the cloud via MQTT.
 
 ### Hardware & Data Flow Map
 
@@ -36,12 +37,14 @@ flowchart TD
         CAM --> MAIX
     end
 
-    subgraph Tier3_Sensors ["Analog Sensor Hub (ESP32)"]
-        ESP["ESP32 Dev Module"]
+    subgraph Tier3_Sensors ["Analog & Environment Sensor Hub (ESP32-S3)"]
+        ESP["ESP32-S3 Dev Module"]
         SOIL["Capacitive Soil Moisture Sensor"]
         TURB["Turbidity Sensor (Water Tank)"]
-        SOIL -->|ADC GPIO 34| ESP
-        TURB -->|ADC GPIO 35| ESP
+        US["HC-SR04 Ultrasonic Sensor"]
+        SOIL -->|ADC1 GPIO 1| ESP
+        TURB -->|ADC1 GPIO 2| ESP
+        US -->|GPIO 4 (Trig) / GPIO 5 (Echo)| ESP
     end
 
     subgraph Actuators ["Actuators & Mechanisms"]
@@ -50,7 +53,6 @@ flowchart TD
         SERVO2["MG995R Servo 2 (Probe Deployment)"]
         RELAY["5V Single-Channel Relay Module"]
         PUMP["5V Submersible Water Pump"]
-        US["HC-SR04 Ultrasonic Sensor"]
         MOTORS_L["3x Left DC Gearmotors (Skid-Steer)"]
         MOTORS_R["3x Right DC Gearmotors (Skid-Steer)"]
         
@@ -68,9 +70,8 @@ flowchart TD
 
     %% Data Connections
     MAIX -->|UART TX/RX @ 115200 Baud| PI
-    ESP -->|USB CDC Serial @ 115200 Baud| PI
+    ESP -->|USB CDC Serial (JSON Telemetry) @ 115200 Baud| PI
     PI -->|I2C SDA/SCL - Bus 1| PCA
-    PI -->|GPIO Trigger/Echo| US
     PI -->|GPIO Output| RELAY
     PI -->|RPWM / LPWM / R_EN / L_EN| BTS_L
     PI -->|RPWM / LPWM / R_EN / L_EN| BTS_R
@@ -172,20 +173,22 @@ flowchart TD
 
 ---
 
-## Dev 3 Space (Sensor Hub & Cloud - ESP32 + UI)
+## Dev 3 Space (Sensor Hub & Cloud - ESP32-S3 + UI)
 
 ### Responsibilities
-* Sample analog capacitive soil moisture sensor on GPIO 34 and turbidity sensor on GPIO 35 via ESP32 12-bit ADC.
+* Sample analog capacitive soil moisture sensor and turbidity sensor via ESP32-S3 12-bit ADC (ADC1 channels).
+* Read HC-SR04 ultrasonic distance sensor to provide front obstacle clearance.
 * Clean raw analog signals with an Exponential Moving Average (EMA) low-pass filter to reject electrical motor noise.
-* Stream structured JSON telemetry packets over USB Serial at 10 Hz.
+* Stream structured single-line JSON telemetry packets over USB CDC Serial at 10 Hz.
 * Host Mosquitto MQTT broker on Raspberry Pi and build an interactive Streamlit mission dashboard.
 
 ### Task Checklist
-- [ ] Configure ESP32 ADC on GPIO 34 (Soil Moisture) and GPIO 35 (Turbidity) with 11 dB attenuation (0 - 3.3V range).
+- [ ] Configure ESP32-S3 pins: GPIO 1 (Soil Moisture ADC1), GPIO 2 (Turbidity ADC1), GPIO 4 (Sonar Trig), GPIO 5 (Sonar Echo).
 - [ ] Perform two-point calibration for capacitive soil probe: dry air threshold (`SOIL_RAW_AIR`) and saturated water (`SOIL_RAW_WATER`).
 - [ ] Calibrate turbidity voltage-to-NTU characteristic curve.
 - [ ] Implement digital smoothing filter: $V_{filtered} = \alpha \cdot V_{raw} + (1 - \alpha) \cdot V_{prev}$.
-- [ ] Format and push single-line JSON strings: `{"soil_moisture_pct": float, "turbidity_ntu": float, "turb_v": float}`.
+- [ ] Measure HC-SR04 pulse travel time and convert to distance in centimeters.
+- [ ] Format and push single-line JSON strings: `{"distance_cm": float, "soil_moisture_pct": float, "turbidity_ntu": float, "turb_v": float}`.
 - [ ] Set up local Mosquitto MQTT broker on Raspberry Pi 5.
 - [ ] Develop Streamlit web dashboard (`dashboard_app.py`) featuring live KPI cards, historical moisture/turbidity charts, and FSM status.
 

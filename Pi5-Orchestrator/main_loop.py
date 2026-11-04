@@ -237,17 +237,17 @@ def main():
 
     try:
         while True:
-            # Obstacle Safety Check
-            obstacle_dist_cm = (sonar.distance * 100.0) if sonar else 100.0
+            # Drain sensor queue for latest payload from ESP32-S3
+            while not sensor_queue.empty():
+                latest_sensor_data = sensor_queue.get_nowait()
+
+            # Obstacle Safety Check (read from ESP32-S3 sensor hub or fallback to local sonar)
+            obstacle_dist_cm = latest_sensor_data.get("distance_cm", (sonar.distance * 100.0) if sonar else 100.0)
             if obstacle_dist_cm < 18.0 and state == "SEARCHING":
                 print(f"[SAFETY] Obstacle detected at {obstacle_dist_cm:.1f} cm! Halting rover.")
                 motors.stop()
                 time.sleep(0.2)
                 continue
-
-            # Drain sensor queue for latest payload
-            while not sensor_queue.empty():
-                latest_sensor_data = sensor_queue.get_nowait()
 
             # State Machine Evaluation
             if state == "SEARCHING":
