@@ -132,6 +132,7 @@ flowchart TD
 ### Task Checklist
 - [ ] Configure Raspberry Pi OS to enable hardware I2C-1 and UART0 (`ttyAMA0`).
 - [ ] Install software stack: `pyserial`, `paho-mqtt`, `smbus2`, `adafruit-circuitpython-pca9685`, `gpiozero`.
+- [ ] L298N/BTS7960 Skid-Steer control, PCA9685 servo control, Dual 5V relay control for Water and Fertilizer pumps.
 - [ ] Implement BTS7960 driver control class (RPWM, LPWM, R_EN, L_EN) for left and right motor banks.
 - [ ] Implement 6WD Skid-Steer Kinematics matrix:
   * **Forward:** Both Left and Right banks drive forward.
@@ -235,5 +236,6 @@ flowchart TD
 - [ ] Calibrate Buck Converter 1 output to 5.1V DC (Logic) and Buck Converter 2 to 5.0V DC (Actuators).
 - [ ] Connect common star-ground terminal tying LiPo GND, Buck 1 GND, Buck 2 GND, and controller grounds.
 - [ ] Assemble 3D-printed rack-and-pinion mechanism; attach 2x MG995R metal gear servos and capacitive soil probe.
+- [ ] Plumb the dual 5V pumps, 2-channel relay, tubing, and both fluid tanks (Water + Fertilizer).
 - [ ] Mount water tank, submerge 5V pump, install one-way check valve, and route silicone line to root target zone.
 - [ ] Neatly route all wiring harnesses with spiral wrap, zip ties, and label all connector headers.
